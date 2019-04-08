@@ -29,17 +29,26 @@ namespace Lowering {
 class LLVM_LIBRARY_VISIBILITY Scope {
   CleanupManager &cleanups;
   CleanupsDepth depth;
-  CleanupsDepth savedInnermostScope;
+  Scope *savedInnermostScope;
   CleanupLocation loc;
+
+  friend class CleanupManager;
 
 public:
   explicit Scope(CleanupManager &cleanups, CleanupLocation loc)
       : cleanups(cleanups), depth(cleanups.getCleanupsDepth()),
         savedInnermostScope(cleanups.innermostScope), loc(loc) {
     assert(depth.isValid());
-    cleanups.stack.checkIterator(cleanups.innermostScope);
-    cleanups.innermostScope = depth;
+    cleanups.innermostScope = this;
+    if (savedInnermostScope)
+      cleanups.stack.checkIterator(savedInnermostScope->depth);
   }
+
+  Scope(const Scope &other) = delete;
+  Scope &operator=(const Scope &other) = delete;
+
+  Scope(Scope &&other) = delete;
+  Scope &operator=(Scope &&other) = delete; // implementable if needed
 
   explicit Scope(SILGenFunction &SGF, SILLocation loc)
       : Scope(SGF.Cleanups, CleanupLocation::get(loc)) {}
@@ -55,6 +64,9 @@ public:
       popImpl();
   }
 
+  /// Verify that the invariants of this scope still hold.
+  void verify();
+
   bool isValid() const { return depth.isValid(); }
 
   /// Pop the scope pushing the +1 ManagedValue through the scope. Asserts if mv
@@ -64,12 +76,6 @@ public:
   /// Pop this scope pushing the +1 rvalue through the scope. Asserts if rv is a
   /// plus zero rvalue.
   RValue popPreservingValue(RValue &&rv);
-
-  /// Pop the scope pushing the +1 ManagedValues in `innerValues` through the
-  /// scope. Asserts if any ManagedValue is plus zero. Each cleanup is recreated
-  /// in the outer scope and associated with a managed value in `outerValues`.
-  void popPreservingValues(ArrayRef<ManagedValue> innerValues,
-                           MutableArrayRef<ManagedValue> outerValues);
 
 private:
   /// Internal private implementation of popImpl so we can use it in Scope::pop

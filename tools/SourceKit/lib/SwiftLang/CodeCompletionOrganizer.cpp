@@ -179,6 +179,7 @@ bool SourceKit::CodeCompletion::addCustomCompletions(
     case CompletionKind::AssignmentRHS:
     case CompletionKind::CallArg:
     case CompletionKind::ReturnStmtExpr:
+    case CompletionKind::YieldStmtExpr:
       if (custom.Contexts.contains(CustomCompletionInfo::Expr)) {
         changed = true;
         addCompletion(custom);
@@ -337,8 +338,11 @@ ImportDepth::ImportDepth(ASTContext &context, CompilerInvocation &invocation) {
 
   // Private imports from this module.
   // FIXME: only the private imports from the current source file.
+  ModuleDecl::ImportFilter importFilter;
+  importFilter |= ModuleDecl::ImportFilterKind::Private;
+  importFilter |= ModuleDecl::ImportFilterKind::ImplementationOnly;
   SmallVector<ModuleDecl::ImportedModule, 16> mainImports;
-  main->getImportedModules(mainImports, ModuleDecl::ImportFilter::Private);
+  main->getImportedModules(mainImports, importFilter);
   for (auto &import : mainImports) {
     uint8_t depth = 1;
     if (auxImports.count(import.second->getName().str()))
@@ -1212,6 +1216,7 @@ void CompletionBuilder::getFilterName(CodeCompletionString *str,
       case ChunkKind::Whitespace:
       case ChunkKind::Ellipsis:
       case ChunkKind::Ampersand:
+      case ChunkKind::OptionalMethodCallTail:
         continue;
       case ChunkKind::CallParameterColon:
         // Since we don't add the type, also don't add the space after ':'.

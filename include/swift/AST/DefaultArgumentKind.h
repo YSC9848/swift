@@ -17,6 +17,8 @@
 #ifndef SWIFT_DEFAULTARGUMENTKIND_H
 #define SWIFT_DEFAULTARGUMENTKIND_H
 
+#include <cstdint>
+
 namespace llvm {
 class StringRef;
 }
@@ -26,7 +28,7 @@ namespace swift {
 class Expr;
 
 /// Describes the kind of default argument a tuple pattern element has.
-enum class DefaultArgumentKind : unsigned {
+enum class DefaultArgumentKind : uint8_t {
   /// No default argument.
   None,
   /// A normal default argument.
@@ -50,15 +52,12 @@ enum class DefaultArgumentKind : unsigned {
   EmptyArray,
   /// An empty dictionary literal.
   EmptyDictionary,
+  /// A reference to the stored property. This is a special default argument
+  /// kind for the synthesized memberwise constructor to emit a call to the
+  // property's initializer.
+  StoredProperty,
 };
-
-/// Retrieve the spelling of this default argument in source code, or
-/// an empty string if it has none.
-llvm::StringRef getDefaultArgumentSpelling(DefaultArgumentKind kind);
-
-/// Infer a default argument kind from an expression, if the
-/// expression is the canonical way to spell that default argument.
-DefaultArgumentKind inferDefaultArgumentKind(Expr *expr);
+enum { NumDefaultArgumentKindBits = 4 };
 
 } // end namespace swift
 

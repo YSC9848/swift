@@ -1,4 +1,4 @@
-// RUN: %target-swift-frontend -assume-parsing-unqualified-ownership-sil -parse-as-library -module-name witness_tables -emit-module -o - %s | %target-sil-opt -assume-parsing-unqualified-ownership-sil -module-name witness_tables | %FileCheck %s
+// RUN: %target-swift-frontend -parse-as-library -module-name witness_tables -emit-module -o - %s | %target-sil-opt -module-name witness_tables | %FileCheck %s
 
 protocol AssocReqt {
   func requiredMethod()
@@ -15,7 +15,7 @@ bb0(%0 : $ConformingAssoc):
   return %2 : $()
 }
 
-sil [serialized] @_TTWV14witness_tables15ConformingAssocS_9AssocReqtS_FS1_14requiredMethodU_fRQPS1_FT_T_ : $@convention(witness_method) (@inout ConformingAssoc) -> () {
+sil [serialized] @_TTWV14witness_tables15ConformingAssocS_9AssocReqtS_FS1_14requiredMethodU_fRQPS1_FT_T_ : $@convention(witness_method: AssocReqt) (@inout ConformingAssoc) -> () {
 bb0(%0 : $*ConformingAssoc):
   %1 = load %0 : $*ConformingAssoc
   %2 = function_ref @_TFV14witness_tables15ConformingAssoc14requiredMethodfS0_FT_T_ : $@convention(method) (ConformingAssoc) -> ()

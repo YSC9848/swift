@@ -121,7 +121,7 @@ func testModuloOptionalness() {
   func setIUOClosure(_ fn: () -> Void) { // expected-note {{parameter 'fn' is implicitly non-escaping}} {{28-28=@escaping }}
     iuoClosure = fn // expected-error{{assigning non-escaping parameter 'fn' to an @escaping closure}}
   }
-  var iuoClosureExplicit: ImplicitlyUnwrappedOptional<() -> Void> // expected-warning {{the spelling 'ImplicitlyUnwrappedOptional' is deprecated; use '!' after the type name}}
+  var iuoClosureExplicit: (() -> Void)!
   func setExplicitIUOClosure(_ fn: () -> Void) { // expected-note {{parameter 'fn' is implicitly non-escaping}} {{36-36=@escaping }}
     iuoClosureExplicit = fn // expected-error{{assigning non-escaping parameter 'fn' to an @escaping closure}}
   }
@@ -216,4 +216,17 @@ class HasIVarCaptures {
       x += 1 // no-error
     })()
   }
+}
+
+// https://bugs.swift.org/browse/SR-9760
+protocol SR_9760 {
+  typealias F = () -> Void
+  typealias G<T> = (T) -> Void
+  func foo<T>(_: T, _: @escaping F) // Ok
+  func bar<T>(_: @escaping G<T>) // Ok
+}
+
+extension SR_9760 {
+  func fiz<T>(_: T, _: @escaping F) {} // Ok
+  func baz<T>(_: @escaping G<T>) {} // Ok
 }

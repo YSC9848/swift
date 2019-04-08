@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2018 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See https://swift.org/LICENSE.txt for license information
@@ -76,7 +76,7 @@ class RValue {
   CanType type;
   unsigned elementsToBeAdded;
   
-  /// \brief Flag value used to mark an rvalue as invalid.
+  /// Flag value used to mark an rvalue as invalid.
   ///
   /// The reasons why this can be true is:
   ///
@@ -172,6 +172,9 @@ public:
   static RValue forInContext() {
     return RValue(InContext);
   }
+
+  static unsigned getRValueSize(CanType substType);
+  static unsigned getRValueSize(AbstractionPattern origType, CanType substType);
   
   /// Create an RValue to which values will be subsequently added using
   /// addElement(), with the level of tuple expansion in the input specified
@@ -183,6 +186,14 @@ public:
   /// addElement(). The RValue will not be complete until all the elements have
   /// been added.
   explicit RValue(CanType type);
+
+  /// Return true if the rvalue was null-initialized. The intention is so one
+  /// can trampoline RValue results using if statements, i.e.:
+  ///
+  /// if (RValue rv = foo()) {
+  ///   return rv;
+  /// }
+  operator bool() const & { return isComplete() || isInContext(); }
 
   /// True if the rvalue has been completely initialized by adding all its
   /// elements.
@@ -196,11 +207,6 @@ public:
 
   /// True if this rvalue was emitted into context.
   bool isInContext() const & { return elementsToBeAdded == InContext; }
-  
-  /// True if this represents an lvalue.
-  bool isLValue() const & {
-    return isa<InOutType>(type);
-  }
   
   /// Add an element to the rvalue. The rvalue must not yet be complete.
   void addElement(RValue &&element) &;
@@ -225,22 +231,6 @@ public:
   /// Get the rvalue as a single unmanaged value, imploding tuples if necessary.
   /// The values must not require any cleanups.
   SILValue getUnmanagedSingleValue(SILGenFunction &SGF, SILLocation l) const &;
-  
-  /// Peek at the single scalar value backing this rvalue without consuming it.
-  /// The rvalue must not be of a tuple type.
-  SILValue peekScalarValue() const & {
-    assert(!isa<TupleType>(type) && "peekScalarValue of a tuple rvalue");
-    assert(values.size() == 1 && "exploded scalar value?!");
-    return values[0].getValue();
-  }
-
-  /// Peek at the single ManagedValue backing this rvalue without consuming it
-  /// and return true if the value is not at +1.
-  bool peekIsPlusZeroRValueOrTrivial() const & {
-    assert(!isa<TupleType>(type) && "peekScalarValue of a tuple rvalue");
-    assert(values.size() == 1 && "exploded scalar value?!");
-    return values[0].isPlusZeroRValueOrTrivial();
-  }
 
   ManagedValue getScalarValue() && {
     assert(!isa<TupleType>(type) && "getScalarValue of a tuple rvalue");
@@ -318,46 +308,18 @@ public:
   /// be returned. Otherwise, an object will be returned. So this is a
   /// convenient way to determine if an RValue needs an address.
   SILType getLoweredImplodedTupleType(SILGenFunction &SGF) const &;
-
-  /// Rewrite the type of this r-value.
-  void rewriteType(CanType newType) & {
-#ifndef NDEBUG
-    static const auto areSimilarTypes = [](CanType l, CanType r) {
-      if (l == r) return true;
-
-      // Allow function types to disagree about 'noescape'.
-      if (auto lf = dyn_cast<FunctionType>(l)) {
-        if (auto rf = dyn_cast<FunctionType>(r)) {
-          return lf.getInput() == rf.getInput()
-              && lf.getResult() == rf.getResult()
-              && lf->getExtInfo().withNoEscape(false) ==
-                 lf->getExtInfo().withNoEscape(false);
-        }
-      }
-      return false;
-    };
-
-    static const auto isSingleElementTuple = [](CanType type, CanType eltType) {
-      if (auto tupleType = dyn_cast<TupleType>(type)) {
-        return tupleType->getNumElements() == 1 &&
-               areSimilarTypes(tupleType.getElementType(0), eltType);
-      }
-      return false;
-    };
-
-    // We only allow a very modest set of changes to a type.
-    assert(areSimilarTypes(newType, type) ||
-           isSingleElementTuple(newType, type) ||
-           isSingleElementTuple(type, newType));
-#endif
-    type = newType;
-  }
   
   /// Emit an equivalent value with independent ownership.
   RValue copy(SILGenFunction &SGF, SILLocation loc) const &;
 
+  /// If this RValue is a +0 value, copy the RValue and return. Otherwise,
+  /// return std::move(*this);
+  RValue ensurePlusOne(SILGenFunction &SGF, SILLocation loc) &&;
+
   /// Borrow all subvalues of the rvalue.
   RValue borrow(SILGenFunction &SGF, SILLocation loc) const &;
+
+  RValue copyForDiagnostics() const;
 
   static bool areObviouslySameValue(SILValue lhs, SILValue rhs);
   bool isObviouslyEqual(const RValue &rhs) const;

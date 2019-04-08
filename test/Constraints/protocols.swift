@@ -107,6 +107,9 @@ protocol P : Initable {
   func bar(_ x: Int)
   mutating func mut(_ x: Int)
   static func tum()
+  
+  typealias E = Int
+  typealias F = Self.E
 }
 
 protocol ClassP : class {
@@ -216,6 +219,13 @@ func staticExistential(_ p: P.Type, pp: P.Protocol) {
   // Static member of metatype -- not allowed
   _ = pp.tum // expected-error{{static member 'tum' cannot be used on protocol metatype 'P.Protocol'}}
   _ = P.tum // expected-error{{static member 'tum' cannot be used on protocol metatype 'P.Protocol'}}
+
+  // Access typealias through protocol and existential metatypes
+  _ = pp.E.self
+  _ = p.E.self
+
+  _ = pp.F.self
+  _ = p.F.self
 }
 
 protocol StaticP {
@@ -318,11 +328,11 @@ func testClonableArchetype<T : Clonable>(_ t: T) {
   let _: (Bool) -> T? = id(t.extMaybeClone)
   let _: T? = id(t.extMaybeClone(true))
 
-  let _: (T) -> (Bool) -> T! = id(T.extProbablyClone)
-  let _: (Bool) -> T! = id(T.extProbablyClone(t))
+  let _: (T) -> (Bool) -> T? = id(T.extProbablyClone as (T) -> (Bool) -> T?)
+  let _: (Bool) -> T? = id(T.extProbablyClone(t) as (Bool) -> T?)
   let _: T! = id(T.extProbablyClone(t)(true))
 
-  let _: (Bool) -> T! = id(t.extProbablyClone)
+  let _: (Bool) -> T? = id(t.extProbablyClone as (Bool) -> T?)
   let _: T! = id(t.extProbablyClone(true))
 
   // Static member of extension returning Self)
@@ -332,16 +342,14 @@ func testClonableArchetype<T : Clonable>(_ t: T) {
   let _: (Bool) -> T? = id(T.returnSelfOptionalStatic)
   let _: T? = id(T.returnSelfOptionalStatic(false))
 
-  let _: (Bool) -> T! = id(T.returnSelfIUOStatic)
+  let _: (Bool) -> T? = id(T.returnSelfIUOStatic as (Bool) -> T?)
   let _: T! = id(T.returnSelfIUOStatic(true))
 }
 
 func testClonableExistential(_ v: Clonable, _ vv: Clonable.Type) {
   let _: Clonable? = v.maybeClone()
   let _: Clonable?? = v.doubleMaybeClone()
-  // FIXME: Tuple-to-tuple conversions are not implemented
   let _: (Clonable, Clonable) = v.subdivideClone()
-  // expected-error@-1{{cannot express tuple conversion '(Clonable, Clonable)' to '(Clonable, Clonable)'}}
   let _: Clonable.Type = v.metatypeOfClone()
   let _: () -> Clonable = v.goodClonerFn()
 
@@ -358,7 +366,7 @@ func testClonableExistential(_ v: Clonable, _ vv: Clonable.Type) {
   let _: (Bool) -> Clonable? = id(vv.returnSelfOptionalStatic)
   let _: Clonable? = id(vv.returnSelfOptionalStatic(false))
 
-  let _: (Bool) -> Clonable! = id(vv.returnSelfIUOStatic)
+  let _: (Bool) -> Clonable? = id(vv.returnSelfIUOStatic as (Bool) -> Clonable?)
   let _: Clonable! = id(vv.returnSelfIUOStatic(true))
 
   let _ = v.badClonerFn() // expected-error {{member 'badClonerFn' cannot be used on value of protocol type 'Clonable'; use a generic constraint instead}}

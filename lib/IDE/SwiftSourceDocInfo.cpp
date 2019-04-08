@@ -79,11 +79,19 @@ bool CursorInfoResolver::tryResolve(ValueDecl *D, TypeDecl *CtorTyRef,
   if (!D->hasName())
     return false;
 
-  if (Loc == LocToResolve) {
-    CursorInfo.setValueRef(D, CtorTyRef, ExtTyRef, IsRef, Ty, ContainerType);
-    return true;
+  if (Loc != LocToResolve)
+    return false;
+
+  if (auto *VD = dyn_cast<VarDecl>(D)) {
+    // Handle references to the implicitly generated vars in case statements
+    // matching multiple patterns
+    if (VD->isImplicit()) {
+      if (auto * Parent = VD->getParentVarDecl())
+        D = Parent;
+    }
   }
-  return false;
+  CursorInfo.setValueRef(D, CtorTyRef, ExtTyRef, IsRef, Ty, ContainerType);
+  return true;
 }
 
 bool CursorInfoResolver::tryResolve(ModuleEntity Mod, SourceLoc Loc) {
@@ -111,10 +119,11 @@ bool CursorInfoResolver::tryResolve(Stmt *St) {
 }
 
 bool CursorInfoResolver::visitSubscriptReference(ValueDecl *D, CharSourceRange Range,
-                                              bool IsOpenBracket) {
+                                                 Optional<AccessKind> AccKind,
+                                                 bool IsOpenBracket) {
   // We should treat both open and close brackets equally
   return visitDeclReference(D, Range, nullptr, nullptr, Type(),
-                    ReferenceMetaData(SemaReferenceKind::SubscriptRef, None));
+                    ReferenceMetaData(SemaReferenceKind::SubscriptRef, AccKind));
 }
 
 ResolvedCursorInfo CursorInfoResolver::resolve(SourceLoc Loc) {
@@ -148,9 +157,17 @@ bool CursorInfoResolver::walkToDeclPost(Decl *D) {
 }
 
 bool CursorInfoResolver::walkToStmtPre(Stmt *S) {
+  // Getting the character range for the statement, to account for interpolation
+  // strings. The token range for the interpolation string is the whole string,
+  // with begin/end locations pointing at the beginning of the string, so if
+  // there is a token location inside the string, it will seem as if it is out
+  // of the source range, unless we convert to character range.
+
   // FIXME: Even implicit Stmts should have proper ranges that include any
   // non-implicit Stmts (fix Stmts created for lazy vars).
-  if (!S->isImplicit() && !rangeContainsLoc(S->getSourceRange()))
+  if (!S->isImplicit() &&
+      !rangeContainsLoc(Lexer::getCharSourceRangeFromSourceRange(
+          getSourceMgr(), S->getSourceRange())))
     return false;
   return !tryResolve(S);
 }
@@ -183,8 +200,8 @@ bool CursorInfoResolver::walkToExprPre(Expr *E) {
         ContainerType = SAE->getBase()->getType();
       }
     } else if (auto ME = dyn_cast<MemberRefExpr>(E)) {
-      SourceLoc DotLoc = ME->getDotLoc();
-      if (DotLoc.isValid() && DotLoc.getAdvancedLoc(1) == LocToResolve) {
+      SourceLoc MemberLoc = ME->getNameLoc().getBaseNameLoc();
+      if (MemberLoc.isValid() && MemberLoc == LocToResolve) {
         ContainerType = ME->getBase()->getType();
       }
     }
@@ -248,6 +265,14 @@ SourceManager &NameMatcher::getSourceMgr() const {
   return SrcFile.getASTContext().SourceMgr;
 }
 
+bool CursorInfoResolver::rangeContainsLoc(SourceRange Range) const {
+  return getSourceMgr().rangeContainsTokenLoc(Range, LocToResolve);
+}
+
+bool CursorInfoResolver::rangeContainsLoc(CharSourceRange Range) const {
+  return Range.contains(LocToResolve);
+}
+
 std::vector<ResolvedLoc> NameMatcher::resolve(ArrayRef<UnresolvedLoc> Locs, ArrayRef<Token> Tokens) {
 
   // Note the original indices and sort them in reverse source order
@@ -287,7 +312,8 @@ std::vector<ResolvedLoc> NameMatcher::resolve(ArrayRef<UnresolvedLoc> Locs, Arra
   return Ordered;
 }
 
-static std::vector<CharSourceRange> getLabelRanges(const ParameterList* List, const SourceManager &SM) {
+static std::vector<CharSourceRange> getLabelRanges(const ParameterList* List, 
+                                                   const SourceManager &SM) {
   std::vector<CharSourceRange> LabelRanges;
   for (ParamDecl *Param: *List) {
     if (Param->isImplicit())
@@ -297,13 +323,31 @@ static std::vector<CharSourceRange> getLabelRanges(const ParameterList* List, co
     SourceLoc ParamLoc = Param->getNameLoc();
     size_t NameLength;
     if (NameLoc.isValid()) {
-      LabelRanges.push_back(Lexer::getCharSourceRangeFromSourceRange(SM,
-                                                                     SourceRange(NameLoc, ParamLoc)));
+      LabelRanges.push_back(Lexer::getCharSourceRangeFromSourceRange(
+                                SM, SourceRange(NameLoc, ParamLoc)));
     } else {
       NameLoc = ParamLoc;
       NameLength = Param->getNameStr().size();
       LabelRanges.push_back(CharSourceRange(NameLoc, NameLength));
     }
+  }
+  return LabelRanges;
+}
+
+static std::vector<CharSourceRange> getEnumParamListInfo(SourceManager &SM, 
+                                                         ParameterList *PL) {
+  std::vector<CharSourceRange> LabelRanges;
+  for (ParamDecl *Param: *PL) {
+    if (Param->isImplicit())
+      continue;
+    
+    SourceLoc LabelStart(Param->getTypeLoc().getLoc());
+    SourceLoc LabelEnd(LabelStart);
+    
+    if (Param->getNameLoc().isValid()) {
+      LabelStart = Param->getNameLoc();
+    }
+    LabelRanges.push_back(CharSourceRange(SM, LabelStart, LabelEnd));
   }
   return LabelRanges;
 }
@@ -317,6 +361,11 @@ bool NameMatcher::walkToDeclPre(Decl *D) {
         tryResolve(ASTWalker::ParentTy(), nextLoc());
     }
   }
+
+  // FIXME: Even implicit Decls should have proper ranges if they include any
+  // non-implicit children (fix implicit Decls created for lazy vars).
+  if (D->isImplicit())
+    return !isDone();
 
   if (shouldSkip(D->getSourceRange()))
     return false;
@@ -339,33 +388,19 @@ bool NameMatcher::walkToDeclPre(Decl *D) {
   } else if (AbstractFunctionDecl *AFD = dyn_cast<AbstractFunctionDecl>(D)) {
     std::vector<CharSourceRange> LabelRanges;
     if (AFD->getNameLoc() == nextLoc()) {
-      for(auto ParamList: AFD->getParameterLists()) {
-        LabelRanges = getLabelRanges(ParamList, getSourceMgr());
-        if (LabelRanges.size() == ParamList->size())
-          break;
-      }
+      auto ParamList = AFD->getParameters();
+      LabelRanges = getLabelRanges(ParamList, getSourceMgr());
     }
     tryResolve(ASTWalker::ParentTy(D), D->getLoc(), LabelRangeType::Param,
                LabelRanges);
   } else if (SubscriptDecl *SD = dyn_cast<SubscriptDecl>(D)) {
-    tryResolve(ASTWalker::ParentTy(D), D->getLoc(), LabelRangeType::Param,
+    tryResolve(ASTWalker::ParentTy(D), D->getLoc(), LabelRangeType::NoncollapsibleParam,
                getLabelRanges(SD->getIndices(), getSourceMgr()));
   } else if (EnumElementDecl *EED = dyn_cast<EnumElementDecl>(D)) {
-    if (TupleTypeRepr *TTR = dyn_cast_or_null<TupleTypeRepr>(EED->getArgumentTypeLoc().getTypeRepr())) {
-      size_t ElemIndex = 0;
-      std::vector<CharSourceRange> LabelRanges;
-      for(const TupleTypeReprElement &Elem: TTR->getElements()) {
-        SourceLoc LabelStart(Elem.Type->getStartLoc());
-        SourceLoc LabelEnd(LabelStart);
-
-        auto NameIdentifier = TTR->getElementName(ElemIndex);
-        if (!NameIdentifier.empty()) {
-          LabelStart = TTR->getElementNameLoc(ElemIndex);
-        }
-        LabelRanges.push_back(CharSourceRange(getSourceMgr(), LabelStart, LabelEnd));
-        ++ElemIndex;
-      }
-      tryResolve(ASTWalker::ParentTy(D), D->getLoc(), LabelRangeType::CallArg, LabelRanges);
+    if (auto *ParamList = EED->getParameterList()) {
+      auto LabelRanges = getEnumParamListInfo(getSourceMgr(), ParamList);
+      tryResolve(ASTWalker::ParentTy(D), D->getLoc(), LabelRangeType::CallArg,
+                 LabelRanges);
     } else {
       tryResolve(ASTWalker::ParentTy(D), D->getLoc());
     }
@@ -433,6 +468,25 @@ std::pair<bool, Expr*> NameMatcher::walkToExprPre(Expr *E) {
           tryResolve(ASTWalker::ParentTy(E), nextLoc());
         } while (!shouldSkip(E));
         break;
+      case ExprKind::Subscript: {
+        auto SubExpr = cast<SubscriptExpr>(E);
+        // visit and check in source order
+        if (!SubExpr->getBase()->walk(*this))
+          return {false, nullptr};
+
+        auto Labels = getCallArgLabelRanges(getSourceMgr(), SubExpr->getIndex(),
+                                            LabelRangeEndAt::BeforeElemStart);
+        tryResolve(ASTWalker::ParentTy(E), E->getLoc(), LabelRangeType::CallArg, Labels);
+        if (isDone())
+            break;
+        if (!SubExpr->getIndex()->walk(*this))
+          return {false, nullptr};
+
+        // We already visited the children.
+        if (!walkToExprPost(E))
+          return {false, nullptr};
+        return {false, E};
+      }
       case ExprKind::Tuple: {
         TupleExpr *T = cast<TupleExpr>(E);
         // Handle arg label locations (the index reports property occurrences
@@ -532,7 +586,7 @@ std::pair<bool, Pattern*> NameMatcher::walkToPatternPre(Pattern *P) {
   if (isDone() || shouldSkip(P->getSourceRange()))
     return std::make_pair(false, P);
 
-  tryResolve(ASTWalker::ParentTy(P), P->getLoc());
+  tryResolve(ASTWalker::ParentTy(P), P->getStartLoc());
   return std::make_pair(!isDone(), P);
 }
 
@@ -563,35 +617,21 @@ void NameMatcher::skipLocsBefore(SourceLoc Start) {
 }
 
 bool NameMatcher::shouldSkip(Expr *E) {
-  if (!isa<StringLiteralExpr>(E) || !Parent.getAsExpr() ||
-      !isa<InterpolatedStringLiteralExpr>(Parent.getAsExpr()))
-    return shouldSkip(E->getSourceRange());
+  if (isa<StringLiteralExpr>(E) && Parent.getAsExpr()) {
+    // Attempting to get the CharSourceRange from the SourceRange of a
+    // StringLiteralExpr that is a segment of an interpolated string gives
+    // incorrect ranges. Use the CharSourceRange of the corresponding token
+    // instead.
 
-  // The lexer treats interpolated strings as a single token when computing the
-  // CharSourceRange, so when we try to get the CharSourceRange of its first
-  // child StringLiteralExpr (at the same SourceLoc) it goes beyond any
-  // interpolated values. Use the StartLoc of the next sibling to bound it.
+    auto ExprStart = E->getStartLoc();
+    auto RemaingTokens = TokensToCheck.drop_while([&](const Token &tok) -> bool {
+      return getSourceMgr().isBeforeInBuffer(tok.getRange().getStart(), ExprStart);
+    });
 
-  StringLiteralExpr *SL = cast<StringLiteralExpr>(E);
-  InterpolatedStringLiteralExpr *ISL =
-    cast<InterpolatedStringLiteralExpr>(Parent.getAsExpr());
-
-  SourceLoc Start = SL->getStartLoc();
-  ArrayRef<Expr*> Segments = ISL->getSegments();
-  Segments = Segments.drop_until([&](Expr *Item){ return Item == SL; })
-    .drop_front();
-
-  CharSourceRange Range;
-  if (Segments.empty()) {
-    Range = Lexer::getCharSourceRangeFromSourceRange(getSourceMgr(),
-                                                     SourceRange(Start));
-  } else {
-    SourceLoc NextSiblingLoc = Segments.front()->getStartLoc();
-    unsigned Length = getSourceMgr().getByteDistance(Start, NextSiblingLoc);
-    Range = CharSourceRange(Start, Length);
+    if (!RemaingTokens.empty() && RemaingTokens.front().getLoc() == ExprStart)
+      return shouldSkip(RemaingTokens.front().getRange());
   }
-
-  return shouldSkip(Range);
+  return shouldSkip(E->getSourceRange());
 }
 
 bool NameMatcher::shouldSkip(SourceRange Range) {
@@ -698,6 +738,7 @@ void ResolvedRangeInfo::print(llvm::raw_ostream &OS) {
   switch (Kind) {
   case RangeKind::SingleExpression: OS << "SingleExpression"; break;
   case RangeKind::SingleDecl: OS << "SingleDecl"; break;
+  case RangeKind::MultiTypeMemberDecl: OS << "MultiTypeMemberDecl"; break;
   case RangeKind::MultiStatement: OS << "MultiStatement"; break;
   case RangeKind::PartOfExpression: OS << "PartOfExpression"; break;
   case RangeKind::SingleStatement: OS << "SingleStatement"; break;
@@ -824,7 +865,7 @@ static bool hasUnhandledError(ArrayRef<ASTNode> Nodes) {
 
   return Nodes.end() != std::find_if(Nodes.begin(), Nodes.end(), [](ASTNode N) {
     ThrowingEntityAnalyzer Analyzer;
-    N.walk(Analyzer);
+    Analyzer.walk(N);
     return Analyzer.isThrowing();
   });
 }
@@ -883,6 +924,17 @@ private:
       return llvm::any_of(StartMatches, IsCase) &&
           llvm::any_of(EndMatches, IsCase);
     }
+
+    bool isMultiTypeMemberDecl() {
+      if (StartMatches.empty() || EndMatches.empty())
+        return false;
+
+      // Multi-decls should have the same nominal type as a common parent
+      if (auto ParentDecl = Parent.dyn_cast<Decl *>())
+        return isa<NominalTypeDecl>(ParentDecl);
+
+      return false;
+    }
   };
 
 
@@ -911,6 +963,7 @@ private:
     switch(Kind) {
     case RangeKind::Invalid:
     case RangeKind::SingleDecl:
+    case RangeKind::MultiTypeMemberDecl:
     case RangeKind::PartOfExpression:
       llvm_unreachable("cannot get type.");
 
@@ -960,6 +1013,7 @@ private:
       return {VoidTy, ExitState::Negative};
     }
     }
+    llvm_unreachable("unhandled kind");
   }
 
   ResolvedRangeInfo getSingleNodeKind(ASTNode Node) {
@@ -1181,7 +1235,7 @@ public:
   void postAnalysis(ASTNode EndNode) {
     // Visit the content of this node thoroughly, because the walker may
     // abort early.
-    EndNode.walk(CompleteWalker(this));
+    CompleteWalker(this).walk(EndNode);
 
     // Analyze whether declared decls in the range is referenced outside of it.
     FurtherReferenceWalker(this).walk(getImmediateContext());
@@ -1227,7 +1281,7 @@ public:
     };
     for (auto N : Nodes) {
       ControlFlowStmtSelector TheWalker;
-      N.walk(TheWalker);
+      TheWalker.walk(N);
       for (auto Pair : TheWalker.Ranges) {
 
         // If the entire range does not include the target's range, we find
@@ -1247,7 +1301,15 @@ public:
     Decl *D = Node.is<Decl*>() ? Node.get<Decl*>() : nullptr;
     analyzeDecl(D);
     auto &DCInfo = getCurrentDC();
-    switch (getRangeMatchKind(Node.getSourceRange())) {
+
+    auto NodeRange = Node.getSourceRange();
+
+    // Widen the node's source range to include all attributes to get a range
+    // match if a function with its attributes has been selected.
+    if (auto D = Node.dyn_cast<Decl *>())
+      NodeRange = D->getSourceRangeIncludingAttrs();
+
+    switch (getRangeMatchKind(NodeRange)) {
     case RangeMatchKind::NoneMatch: {
       // PatternBindingDecl is not visited; we need to explicitly analyze here.
       if (auto *VA = dyn_cast_or_null<VarDecl>(D))
@@ -1288,6 +1350,21 @@ public:
                 TokensInRange,
                 getImmediateContext(), nullptr,
                 hasSingleEntryPoint(ContainedASTNodes),
+                hasUnhandledError(ContainedASTNodes),
+                getOrphanKind(ContainedASTNodes),
+                llvm::makeArrayRef(ContainedASTNodes),
+                llvm::makeArrayRef(DeclaredDecls),
+                llvm::makeArrayRef(ReferencedDecls)};
+    }
+
+    if (DCInfo.isMultiTypeMemberDecl()) {
+      postAnalysis(DCInfo.EndMatches.back());
+      Result = {RangeKind::MultiTypeMemberDecl,
+                ReturnInfo(),
+                TokensInRange,
+                getImmediateContext(),
+                /*Common Parent Expr*/ nullptr,
+                /*SinleEntry*/ true,
                 hasUnhandledError(ContainedASTNodes),
                 getOrphanKind(ContainedASTNodes),
                 llvm::makeArrayRef(ContainedASTNodes),
@@ -1571,15 +1648,18 @@ getCallArgInfo(SourceManager &SM, Expr *Arg, LabelRangeEndAt EndKind) {
         if (EndKind == LabelRangeEndAt::LabelNameOnly)
           LabelEnd = LabelStart.getAdvancedLoc(NameIdentifier.getLength());
       }
-
+      bool IsTrailingClosure = TE->hasTrailingClosure() &&
+        ElemIndex == TE->getNumElements() - 1;
       InfoVec.push_back({getSingleNonImplicitChild(Elem),
-        CharSourceRange(SM, LabelStart, LabelEnd)});
+        CharSourceRange(SM, LabelStart, LabelEnd), IsTrailingClosure});
       ++ElemIndex;
     }
   } else if (auto *PE = dyn_cast<ParenExpr>(Arg)) {
     if (auto Sub = PE->getSubExpr())
       InfoVec.push_back({getSingleNonImplicitChild(Sub),
-        CharSourceRange(Sub->getStartLoc(), 0)});
+        CharSourceRange(Sub->getStartLoc(), 0),
+        PE->hasTrailingClosure()
+      });
   }
   return InfoVec;
 }
@@ -1588,7 +1668,13 @@ std::vector<CharSourceRange> swift::ide::
 getCallArgLabelRanges(SourceManager &SM, Expr *Arg, LabelRangeEndAt EndKind) {
   std::vector<CharSourceRange> Ranges;
   auto InfoVec = getCallArgInfo(SM, Arg, EndKind);
-  std::transform(InfoVec.begin(), InfoVec.end(), std::back_inserter(Ranges),
+
+  auto EndWithoutTrailing = std::remove_if(InfoVec.begin(), InfoVec.end(),
+                                           [](CallArgInfo &Info) {
+                                             return Info.IsTrailingClosure;
+                                           });
+  std::transform(InfoVec.begin(), EndWithoutTrailing,
+                 std::back_inserter(Ranges),
                  [](CallArgInfo &Info) { return Info.LabelRange; });
   return Ranges;
 }

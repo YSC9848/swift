@@ -73,15 +73,12 @@ private:
 
   llvm::DenseSet<SILNode *> Visited;
   llvm::SetVector<SILNode *> DFSStack;
-  typedef llvm::DenseMap<SILNode *, DFSInfo *> ValueInfoMapType;
+  typedef llvm::DenseMap<SILNode *, std::unique_ptr<DFSInfo>> ValueInfoMapType;
   ValueInfoMapType ValueInfoMap;
 
   void cleanup() {
     Visited.clear();
     DFSStack.clear();
-    for (auto &Entry : ValueInfoMap)
-      delete Entry.second;
-
     ValueInfoMap.clear();
     CurrentNum = 0;
   }
@@ -89,8 +86,8 @@ private:
   DFSInfo &addDFSInfo(SILNode *node) {
     assert(node->isRepresentativeSILNodeInObject());
 
-    auto entry = std::make_pair(node, new DFSInfo(node, CurrentNum++));
-    auto insertion = ValueInfoMap.insert(entry);
+    auto insertion = ValueInfoMap.try_emplace(node,
+                                              new DFSInfo(node, CurrentNum++));
     assert(insertion.second && "Cannot add DFS info more than once!");
     return *insertion.first->second;
   }
@@ -133,7 +130,13 @@ private:
     case TermKind::ReturnInst:
     case TermKind::SwitchValueInst:
     case TermKind::ThrowInst:
+    case TermKind::UnwindInst:
       llvm_unreachable("Did not expect terminator that does not have args!");
+
+    case TermKind::YieldInst:
+      for (auto &O : cast<YieldInst>(Term)->getAllOperands())
+        Operands.push_back(O.get());
+      return;
 
     case TermKind::TryApplyInst:
       for (auto &O : cast<TryApplyInst>(Term)->getAllOperands())

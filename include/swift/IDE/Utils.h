@@ -19,7 +19,7 @@
 #include "swift/AST/DeclNameLoc.h"
 #include "swift/AST/Module.h"
 #include "swift/AST/ASTPrinter.h"
-#include "swift/AST/SourceEntityWalker.h"
+#include "swift/IDE/SourceEntityWalker.h"
 #include "swift/Parse/Token.h"
 #include "llvm/ADT/StringRef.h"
 #include <memory>
@@ -77,8 +77,8 @@ struct SourceCompleteResult {
 };
 
 SourceCompleteResult
-isSourceInputComplete(std::unique_ptr<llvm::MemoryBuffer> MemBuf);
-SourceCompleteResult isSourceInputComplete(StringRef Text);
+isSourceInputComplete(std::unique_ptr<llvm::MemoryBuffer> MemBuf, SourceFileKind SFKind);
+SourceCompleteResult isSourceInputComplete(StringRef Text, SourceFileKind SFKind);
 
 bool initInvocationByClangArguments(ArrayRef<const char *> ArgList,
                                     CompilerInvocation &Invok,
@@ -87,7 +87,7 @@ bool initInvocationByClangArguments(ArrayRef<const char *> ArgList,
 /// Visits all overridden declarations exhaustively from VD, including protocol
 /// conformances and clang declarations.
 void walkOverriddenDecls(const ValueDecl *VD,
-                         std::function<void(llvm::PointerUnion<
+                         llvm::function_ref<void(llvm::PointerUnion<
                              const ValueDecl*, const clang::NamedDecl*>)> Fn);
 
 void collectModuleNames(StringRef SDKPath, std::vector<std::string> &Modules);
@@ -129,16 +129,6 @@ void getLocationInfoForClangNode(ClangNode ClangNode,
                                  StringRef &Filename);
 
 Optional<std::pair<unsigned, unsigned>> parseLineCol(StringRef LineCol);
-
-Decl *getDeclFromUSR(ASTContext &context, StringRef USR, std::string &error);
-Decl *getDeclFromMangledSymbolName(ASTContext &context, StringRef mangledName,
-                                   std::string &error);
-
-Type getTypeFromMangledTypename(ASTContext &Ctx, StringRef mangledName,
-                                std::string &error);
-
-Type getTypeFromMangledSymbolname(ASTContext &Ctx, StringRef mangledName,
-                                  std::string &error);
 
 class XMLEscapingPrinter : public StreamPrinter {
   public:
@@ -233,15 +223,15 @@ private:
   bool visitDeclarationArgumentName(Identifier Name, SourceLoc StartLoc,
                                     ValueDecl *D) override;
   bool visitModuleReference(ModuleEntity Mod, CharSourceRange Range) override;
-  bool rangeContainsLoc(SourceRange Range) const {
-    return getSourceMgr().rangeContainsTokenLoc(Range, LocToResolve);
-  }
+  bool rangeContainsLoc(SourceRange Range) const;
+  bool rangeContainsLoc(CharSourceRange Range) const;
   bool isDone() const { return CursorInfo.isValid(); }
   bool tryResolve(ValueDecl *D, TypeDecl *CtorTyRef, ExtensionDecl *ExtTyRef,
                   SourceLoc Loc, bool IsRef, Type Ty = Type());
   bool tryResolve(ModuleEntity Mod, SourceLoc Loc);
   bool tryResolve(Stmt *St);
   bool visitSubscriptReference(ValueDecl *D, CharSourceRange Range,
+                               Optional<AccessKind> AccKind,
                                bool IsOpenBracket) override;
 };
 
@@ -254,6 +244,7 @@ enum class LabelRangeType {
   None,
   CallArg,    // foo([a: ]2) or .foo([a: ]String)
   Param,  // func([a b]: Int)
+  NoncollapsibleParam, // subscript([a a]: Int)
   Selector,   // #selector(foo.func([a]:))
 };
 
@@ -316,7 +307,7 @@ public:
   std::vector<ResolvedLoc> resolve(ArrayRef<UnresolvedLoc> Locs, ArrayRef<Token> Tokens);
 };
 
-enum class RangeKind : int8_t{
+enum class RangeKind : int8_t {
   Invalid = -1,
   SingleExpression,
   SingleStatement,
@@ -324,6 +315,8 @@ enum class RangeKind : int8_t{
 
   MultiStatement,
   PartOfExpression,
+
+  MultiTypeMemberDecl,
 };
 
 struct DeclaredDecl {
@@ -497,14 +490,15 @@ enum class RegionType {
 };
 
 enum class RefactoringRangeKind {
-  BaseName,              // func [foo](a b: Int)
-  KeywordBaseName,       // [init](a: Int)
-  ParameterName,         // func foo(a [b]: Int)
-  DeclArgumentLabel,     // func foo([a] b: Int)
-  CallArgumentLabel,     // foo([a]: 1)
-  CallArgumentColon,     // foo(a[: ]1)
-  CallArgumentCombined,  // foo([]1) could expand to foo([a: ]1)
-  SelectorArgumentLabel, // foo([a]:)
+  BaseName,                    // func [foo](a b: Int)
+  KeywordBaseName,             // [init](a: Int)
+  ParameterName,               // func foo(a[ b]: Int)
+  NoncollapsibleParameterName, // subscript(a[ a]: Int)
+  DeclArgumentLabel,           // func foo([a] b: Int)
+  CallArgumentLabel,           // foo([a]: 1)
+  CallArgumentColon,           // foo(a[: ]1)
+  CallArgumentCombined,        // foo([]1) could expand to foo([a: ]1)
+  SelectorArgumentLabel,       // foo([a]:)
 };
 
 struct NoteRegion {
@@ -597,6 +591,7 @@ enum class LabelRangeEndAt: int8_t {
 struct CallArgInfo {
   Expr *ArgExp;
   CharSourceRange LabelRange;
+  bool IsTrailingClosure;
   CharSourceRange getEntireCharRange(const SourceManager &SM) const;
 };
 
@@ -604,8 +599,20 @@ std::vector<CallArgInfo>
 getCallArgInfo(SourceManager &SM, Expr *Arg, LabelRangeEndAt EndKind);
 
 // Get the ranges of argument labels from an Arg, either tuple or paren.
+// This includes empty ranges for any unlabelled arguments, and excludes
+// trailing closures.
 std::vector<CharSourceRange>
 getCallArgLabelRanges(SourceManager &SM, Expr *Arg, LabelRangeEndAt EndKind);
+
+/// Whether a decl is defined from clang source.
+bool isFromClang(const Decl *D);
+
+/// Retrieve the effective Clang node for the given declaration, which
+/// copes with the odd case of imported Error enums.
+ClangNode getEffectiveClangNode(const Decl *decl);
+
+/// Retrieve the Clang node for the given extension, if it has one.
+ClangNode extensionGetClangNode(const ExtensionDecl *ext);
 
 } // namespace ide
 } // namespace swift
